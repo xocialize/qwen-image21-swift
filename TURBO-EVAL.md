@@ -119,3 +119,25 @@ sigmas on a parity-locked core, no new encoder/VAE/processor work), it makes the
 2048² sizes practical, and it keeps the base package untouched for parity. Gate it on the §4.5
 A/B before the server treats it as more than a named option. Licence posture unchanged — it is
 still not a product asset (AB-D-0085); revisit if Qwen grants a commercial licence for 2.x.
+
+## 7. Outcome (2026-10-09, same day)
+
+Ported as `QwenImage21TurboPackage` in the `MLXQwenImage21` module (v0.2.0), the way §4 laid out:
+`generate(sigmas:)` seam, three-root configuration, mirror
+[`xocialize/Qwen-Image-2.1-Turbo`](https://huggingface.co/xocialize/Qwen-Image-2.1-Turbo) (DiT +
+configs only, hash-verified), ML[X] Image Server entry `qwen-image-2.1-turbo` (0f80ddc).
+
+- Parity on the Turbo weights: `--sched` exact, `--dit` green on all three layouts, cos ≥
+  0.9999998 (goldens from the Turbo DiT on diffusers main 1d5d056).
+- Timing, Release, uncontended (AB-R-0441): 1024² T2I **1.33 s/step, 13.1 s per generate**;
+  1-ref edit 16.9 s; 2048² 71 s. Membench inside the base envelope, so the manifest carries the
+  base's measured split. (The §3 estimate assumed the 2026-09-20 step rate; the port had already
+  sped up to ~1.4 s/step, so base-40 is ~60 s today and the ratio, not the absolute, held.)
+- A/B base-40 vs Turbo-8, 10 cases (AB-R-0443): 4.3–4.9× at 1024², 4.5× at 2048²; SigLIP2
+  NR-IQA within ±0.02 on every pair, split 5/5; text letter-perfect on both arms (neon sign,
+  poster title + subtitle); 1-ref and 2-ref edits identity-preserving; four seeds give four
+  distinct foxes. One adherence miss: the poster subtitle rendered at the top, not the prompted
+  bottom. Verdict: serve Turbo as the fast tier of the named model; keep the base for
+  layout-critical typography and as the parity reference.
+- Oracle note for the next person: `e2e_photo_dog.png` is the base's own seed-42 render, so an
+  edit of it at seed 42 replays its noise in the reference (diffusers#14824) — use another seed.
