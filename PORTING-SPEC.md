@@ -225,6 +225,14 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   MPS render (`e2e_turbo_fox_1024.png`; different RNG, so an eyeball gate), 1.34 s/step, 13.2 s
   for 8 steps, peak 31.2 GB (Release, lightly contended). Offline wrapper gates green: manifest,
   MAT (three repos), CAN-1..3 on both surfaces.
+- 2026-10-09 TURBO timing + membench, Release, uncontended (AB-R-0438): T2I 1024² 1.33 s/step,
+  13.1 s per generate, peak 31.2 GB; 1-ref edit 1024² prefill 4.7 s + 1.50 s/step, 16.9 s; T2I
+  2048² 8.0 s/step, 71 s, peak 33.8 GB. Membench floor 15.58 GB, activation 16.3 / 23.5 / 17.5 /
+  23.3 GB (T2I 1024², 2048², edit 1, 4 refs) — inside the base declaration, so the Turbo manifest
+  carries the base split. Edit e2e: Swift's 8-step "red scarf" on `e2e_photo_dog.png` is correct;
+  the oracle's seed-42 MPS edit of the same file is the haloed no-op — that PNG is the base model's
+  own 1024²/seed-42 render, so seed 42 replays its noise (§12, diffusers#14824); Swift's edit seed
+  offset is what makes it immune. Oracle re-run at seed 4242 for the eyeball comparison.
 - 2026-09-20 sched/attn-probe/resize/vae/encoder: green (AB-R-0253). DiT GPU fp32: green on
   target rows, prefill, KV cache, cached + uncached steps for all layouts; 2-image prefix rows
   relMax 3.9e-2 at cos 0.99999 (GPU noise, CPU run pending).

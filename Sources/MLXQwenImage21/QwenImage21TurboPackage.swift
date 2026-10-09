@@ -140,8 +140,10 @@ public final class QwenImage21TurboPackage: ModelPackage {
                 // The base package's MEASURED split (AB-R-0290): Turbo has the same tensor set, the
                 // same resident DiT bf16 + VAE fp32, the same per-step graph at every envelope size
                 // and the same decode — only the step count differs, which the footprint does not
-                // depend on. The envelope (QwenImage21Envelope) is enforced in run() as for the base.
-                // A Turbo `--membench` re-run is owed for the record (AB-T-0212).
+                // depend on. Confirmed by `--membench --turbo` (M5 Max, AB-R-0438): floor 15.58 GB;
+                // activation T2I 1024² 16.31, T2I 2048² 23.54, edit 1 ref 17.46, edit 4 refs 23.28 GB
+                // — inside the base's 43.2 GB declaration (its 10-ref edit). The envelope
+                // (QwenImage21Envelope) is enforced in run() as for the base.
                 footprints: QwenImage21Package.manifest.requirements.footprints,
                 requiredBackends: [.metalGPU],
                 os: OSRequirement(minMacOS: SemanticVersion(major: 26, minor: 0, patch: 0)),
