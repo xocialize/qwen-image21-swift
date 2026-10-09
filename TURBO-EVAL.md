@@ -125,7 +125,8 @@ still not a product asset (AB-D-0085); revisit if Qwen grants a commercial licen
 Ported as `QwenImage21TurboPackage` in the `MLXQwenImage21` module (v0.2.0), the way §4 laid out:
 `generate(sigmas:)` seam, three-root configuration, mirror
 [`xocialize/Qwen-Image-2.1-Turbo`](https://huggingface.co/xocialize/Qwen-Image-2.1-Turbo) (DiT +
-configs only, hash-verified), ML[X] Image Server entry `qwen-image-2.1-turbo` (0f80ddc).
+configs only, hash-verified). In ML[X] Image Server, naming **`qwen-image-2.1` now serves the Turbo
+checkpoint** (operator decision after the A/B below); the 40-step original is `qwen-image-2.1-base`.
 
 - Parity on the Turbo weights: `--sched` exact, `--dit` green on all three layouts, cos ≥
   0.9999998 (goldens from the Turbo DiT on diffusers main 1d5d056).
