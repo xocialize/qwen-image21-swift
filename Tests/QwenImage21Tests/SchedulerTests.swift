@@ -14,6 +14,40 @@ final class SchedulerTests: XCTestCase {
         XCTAssertTrue(zip(s, s.dropFirst()).allSatisfy { $0 > $1 })
     }
 
+    /// Qwen-Image-2.1-Turbo ships its schedule as `sample_sigmas` (diffusers PR #14950) with the
+    /// shift pipeline off: the grid is used verbatim, 0 appended, whatever the token count.
+    func testFixedGridIsVerbatimPlusTerminal() throws {
+        let turbo: [Float] = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568]
+        let s = try QwenImage21Scheduler.fixedGrid(turbo)
+        XCTAssertEqual(s.count, 9)
+        XCTAssertEqual(Array(s.dropLast()), turbo)
+        XCTAssertEqual(s.last, 0)
+        XCTAssertThrowsError(try QwenImage21Scheduler.fixedGrid([]))
+        XCTAssertThrowsError(try QwenImage21Scheduler.fixedGrid([1.0, 0.5, 0.5]))  // not strictly decreasing
+        XCTAssertThrowsError(try QwenImage21Scheduler.fixedGrid([1.0, 0.5, 0.0]))  // the terminal is the scheduler's
+        XCTAssertThrowsError(try QwenImage21Scheduler.fixedGrid([1.2, 0.5]))       // outside (0, 1]
+    }
+
+    /// `sample_sigmas` comes from `model_index.json`; a scheduler config that would still shift
+    /// the grid is refused, not silently ignored.
+    func testSampleSigmasReadFromModelIndex() throws {
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("qi21-sample-sigmas-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp.appendingPathComponent("scheduler"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let index = tmp.appendingPathComponent("model_index.json")
+        let sched = tmp.appendingPathComponent("scheduler/scheduler_config.json")
+        // the base 2.1: no key -> nil (the shifted linspace schedule applies)
+        try #"{"_class_name": "QwenImage21Pipeline"}"#.write(to: index, atomically: true, encoding: .utf8)
+        XCTAssertNil(try QwenImage21Scheduler.loadSampleSigmas(snapshot: tmp))
+        // Turbo: the grid + the identity scheduler
+        try #"{"sample_sigmas": [1.0, 0.5, 0.25]}"#.write(to: index, atomically: true, encoding: .utf8)
+        try #"{"use_dynamic_shifting": false, "shift": 1.0, "shift_terminal": null}"#.write(to: sched, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try QwenImage21Scheduler.loadSampleSigmas(snapshot: tmp), [1.0, 0.5, 0.25])
+        // a shifting scheduler would process the grid — refused
+        try #"{"use_dynamic_shifting": true, "shift": 1.0, "shift_terminal": 0.02}"#.write(to: sched, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try QwenImage21Scheduler.loadSampleSigmas(snapshot: tmp))
+    }
+
     /// Noise replay (diffusers#14824): an edit must never draw the text-to-image noise for the
     /// same seed, or it re-runs the generation instead of editing.
     func testEditNoiseIsDomainSeparatedFromTextToImage() {

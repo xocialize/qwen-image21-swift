@@ -290,14 +290,9 @@ public final class QwenImage21Package: ModelPackage {
         }
         // DiT (bf16) + VAE (fp32) stay resident; the encoder loads per request and is evicted
         // before the denoise peak unless `keepEncoderResident`.
-        let transformer = try QwenImage21Weights.loadTransformer(
-            directory: snapshot.appendingPathComponent("transformer"), dtype: .bfloat16)
-        let vae = try QwenImage21Weights.loadVAE(directory: snapshot.appendingPathComponent("vae"), dtype: .float32)
-        let generator = QwenImage21Generator(
-            encoderProvider: { try await QwenImage21PromptEncoder.load(qwenDir: textEncoder, dtype: .bfloat16) },
-            transformer: transformer, vae: vae, keepEncoderResident: configuration.keepEncoderResident)
-        generator.warmup()
-        self.generator = generator
+        self.generator = try QwenImage21Serving.load(
+            snapshot: snapshot, vaeSnapshot: snapshot, textEncoder: textEncoder,
+            keepEncoderResident: configuration.keepEncoderResident)
     }
 
     public func unload() async {
@@ -311,58 +306,13 @@ public final class QwenImage21Package: ModelPackage {
         // seam), rethrowing CancellationError unchanged.
         try Task.checkCancellation()
         guard let generator else { throw PackageError.notLoaded }
-
-        let prompt: String
-        let negative: String?
-        let images: [QwenImage21RGBAImage]
-        let width: Int?, height: Int?, steps: Int, seed: UInt64
-        let cfg: Float
-        switch request.capability {
-        case .textToImage:
-            guard let t2i = request as? T2IRequest else { throw PackageError.unsupportedCapability(request.capability) }
-            prompt = t2i.prompt; negative = t2i.negativePrompt; images = []
-            width = t2i.width; height = t2i.height
-            steps = t2i.steps ?? configuration.defaultSteps
-            seed = t2i.seed ?? 0
-            cfg = t2i.guidanceScale.map(Float.init) ?? configuration.defaultTrueCFGScale
-        case .imageEdit:
-            guard let edit = request as? IEditRequest else { throw PackageError.unsupportedCapability(request.capability) }
-            guard !edit.images.isEmpty else { throw QwenImage21PackageError.imageDecode }
-            prompt = edit.prompt; negative = edit.negativePrompt
-            images = try edit.images.map { img in
-                do { return try QwenImage21PNG.read(data: img.data) } catch { throw QwenImage21PackageError.imageDecode }
-            }
-            width = edit.width; height = edit.height
-            steps = edit.steps ?? configuration.defaultSteps
-            seed = edit.seed ?? 0
-            cfg = edit.guidanceScale.map(Float.init) ?? configuration.defaultTrueCFGScale
-        default:
-            throw PackageError.unsupportedCapability(request.capability)
-        }
-        try Task.checkCancellation()
-
-        let outputResolution = images.isEmpty
-            ? configuration.defaultOutputResolution : configuration.defaultEditOutputResolution
-        let (tw, th) = QwenImage21Latents.targetSize(
-            imageSizes: images.map { ($0.width, $0.height) }, width: width, height: height,
-            outputResolution: outputResolution)
-        if let why = QwenImage21Envelope.violation(
-            targetWidth: tw, targetHeight: th, referenceCount: images.count, outputResolution: outputResolution)
-        {
-            throw QwenImage21PackageError.outsideMeasuredEnvelope(why)
-        }
-
-        let result = try await generator.generate(
-            prompt: prompt, images: images, negativePrompt: negative, trueCFGScale: cfg,
-            width: width, height: height, outputResolution: outputResolution,
-            steps: steps, seed: seed, useKVCache: configuration.useKVCache,
-            progress: { step, total in RunProgress.report(.denoise, step: step, totalSteps: total) })
-
-        try Task.checkCancellation()
-        let png: Data
-        do { png = try QwenImage21PNG.pngData(result.image) } catch { throw QwenImage21PackageError.pngEncode }
-        let artifact = Image(format: .png, data: png, width: result.image.width, height: result.image.height)
-        return request.capability == .textToImage ? T2IResponse(image: artifact) : IEditResponse(image: artifact)
+        return try await QwenImage21Serving.run(
+            request, generator: generator,
+            defaults: .init(steps: configuration.defaultSteps, trueCFGScale: configuration.defaultTrueCFGScale,
+                            outputResolution: configuration.defaultOutputResolution,
+                            editOutputResolution: configuration.defaultEditOutputResolution,
+                            useKVCache: configuration.useKVCache),
+            sigmas: nil)
     }
 }
 

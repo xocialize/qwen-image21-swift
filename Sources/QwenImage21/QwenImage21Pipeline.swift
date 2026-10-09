@@ -8,7 +8,9 @@
 //   3. cond latents = VAE mode, normalised, packed (plain spatial flatten — patch_size 1),
 //      concatenated on the sequence axis BEFORE the target noise;
 //   4. FlowMatchEuler: sigmas linspace(1, 1/N, N) -> exponential dynamic shift with
-//      mu = calculate_shift(target tokens; 256/8192, 0.5/0.9) -> stretch to shift_terminal 0.02;
+//      mu = calculate_shift(target tokens; 256/8192, 0.5/0.9) -> stretch to shift_terminal 0.02
+//      — or a FIXED grid (`sigmas:`; Qwen-Image-2.1-Turbo's `sample_sigmas`, diffusers PR #14950)
+//      used verbatim + trailing 0, the shift pipeline off;
 //   5. denoise with the prefix KV cache (step 0 "extract", then "cached"); Euler update;
 //      guidance is OFF by default (true_cfg_scale 1.0 — 2.1 is meant to run without it);
 //   6. unpack -> de-normalise -> VAE decode -> RGBA8.
@@ -49,6 +51,45 @@ public enum QwenImage21Scheduler {
         var out = s.map { Float($0) }
         out.append(0)
         return out
+    }
+
+    /// A checkpoint-supplied grid used verbatim (diffusers PR #14950 `sample_sigmas` — how
+    /// Qwen-Image-2.1-Turbo ships its 8 steps): no `mu`, no shift, no terminal stretch. The
+    /// reference scheduler still "processes" an explicit grid, but Turbo's scheduler config
+    /// (`use_dynamic_shifting: false`, `shift: 1.0`, `shift_terminal: null`) makes that the
+    /// identity, so only the trailing 0 is appended and timesteps = σ·1000. The grid excludes
+    /// the terminal sigma; its length is the step count, whatever the token count.
+    public static func fixedGrid(_ grid: [Float]) throws -> [Float] {
+        guard !grid.isEmpty else { throw QwenImage21Error.invalidInput("sampling grid is empty") }
+        guard grid[0] <= 1, grid.last! > 0, zip(grid, grid.dropFirst()).allSatisfy({ $0 > $1 }) else {
+            throw QwenImage21Error.invalidInput("sampling grid must be strictly decreasing within (0, 1]: \(grid)")
+        }
+        return grid + [0]
+    }
+
+    /// The snapshot's `model_index.json` `sample_sigmas`, or nil when the checkpoint has none
+    /// (the base 2.1). When present, the snapshot's scheduler config must be the identity
+    /// (shift 1, no dynamic shifting, no terminal) — the only processing `fixedGrid` reproduces;
+    /// anything else is refused rather than silently mis-sampled.
+    public static func loadSampleSigmas(snapshot: URL) throws -> [Float]? {
+        let indexURL = snapshot.appendingPathComponent("model_index.json")
+        guard FileManager.default.fileExists(atPath: indexURL.path) else { return nil }
+        let index = try JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [String: Any] ?? [:]
+        guard let raw = index["sample_sigmas"] as? [Double] else { return nil }
+        let schedURL = snapshot.appendingPathComponent("scheduler/scheduler_config.json")
+        if let data = try? Data(contentsOf: schedURL),
+           let sched = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let dynamic = sched["use_dynamic_shifting"] as? Bool ?? false
+            let shift = sched["shift"] as? Double ?? 1
+            let terminal = sched["shift_terminal"] as? Double
+            guard !dynamic, shift == 1, terminal == nil else {
+                throw QwenImage21Error.loading(
+                    "model_index.json has sample_sigmas but scheduler_config.json would still shift them "
+                        + "(use_dynamic_shifting \(dynamic), shift \(shift), shift_terminal \(terminal.map { "\($0)" } ?? "null")) "
+                        + "— a fixed grid is only supported with the identity scheduler")
+            }
+        }
+        return raw.map { Float($0) }
     }
 }
 
@@ -171,14 +212,19 @@ public final class QwenImage21Generator {
 
     /// - images: condition images (any size); resized here like the reference.
     /// - width/height: explicit output size (rounded down to /32); nil -> derived.
+    /// - sigmas: a fixed sampling grid (terminal 0 excluded) that replaces the shifted linspace
+    ///   schedule — Turbo's `sample_sigmas`. Its length is the step count; `steps` is then ignored.
     /// - latents: injected packed noise [1, h·w, 64] for parity gates (torch RNG ≠ MLX RNG).
     public func generate(
         prompt: String, images: [QwenImage21RGBAImage] = [], negativePrompt: String? = nil,
         trueCFGScale: Float = 1.0, width: Int? = nil, height: Int? = nil, outputResolution: Int = 1024,
-        steps: Int = 40, seed: UInt64 = 0, useKVCache: Bool = true, latents injected: MLXArray? = nil,
+        steps: Int = 40, sigmas grid: [Float]? = nil, seed: UInt64 = 0, useKVCache: Bool = true,
+        latents injected: MLXArray? = nil,
         progress: ((Int, Int) -> Void)? = nil, isolation: isolated (any Actor)? = #isolation
     ) async throws -> Result {
-        guard steps > 0 else { throw QwenImage21Error.invalidInput("steps must be > 0") }
+        // Validate the grid before the encoder is paid for.
+        let fixedSigmas = try grid.map { try QwenImage21Scheduler.fixedGrid($0) }
+        guard fixedSigmas != nil || steps > 0 else { throw QwenImage21Error.invalidInput("steps must be > 0") }
         let area = outputResolution * outputResolution
 
         // 1. Condition images: one resize for both consumers; output size from the last image.
@@ -239,14 +285,15 @@ public final class QwenImage21Generator {
         let slots = pos.imagePadMask + Array(repeating: true, count: nTarget / 4)
         let layout = try transformer.buildLayout(imgMask: slots, imgShapes: imgShapes)
         let negLayout = try neg.map { try transformer.buildLayout(imgMask: $0.imagePadMask + Array(repeating: true, count: nTarget / 4), imgShapes: imgShapes) }
-        let mu = QwenImage21Scheduler.calculateShift(imageSeqLen: nTarget)
-        let sigmas = QwenImage21Scheduler.sigmas(steps: steps, mu: mu)
+        let sigmas = try fixedSigmas
+            ?? QwenImage21Scheduler.sigmas(steps: steps, mu: QwenImage21Scheduler.calculateShift(imageSeqLen: nTarget))
+        let nSteps = sigmas.count - 1
         let cacheOn = useKVCache && transformer.causalCondition
         let posCache = cacheOn ? QwenImage21KVCache(numLayers: transformer.numLayers) : nil
         let negCache = cacheOn && doCFG ? QwenImage21KVCache(numLayers: transformer.numLayers) : nil
 
         // 6. Denoise.
-        for i in 0..<steps {
+        for i in 0..<nSteps {
             try Task.checkCancellation()
             let mode: QwenImage21KVCacheMode = cacheOn ? (i == 0 ? .extract : .cached) : .none
             let t = MLXArray([sigmas[i]])
@@ -266,7 +313,7 @@ public final class QwenImage21Generator {
                 // materialise the prefix K/V slices so the full prefill graph can be released
                 eval((posCache?.arrays ?? []) + (negCache?.arrays ?? []))
             }
-            progress?(i + 1, steps)
+            progress?(i + 1, nSteps)
         }
         try Task.checkCancellation()
 

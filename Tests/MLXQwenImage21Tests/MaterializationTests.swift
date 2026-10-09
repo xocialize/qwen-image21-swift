@@ -40,6 +40,21 @@ final class QwenImage21MaterializationTests: XCTestCase {
         XCTAssertEqual(QwenImage21Package.manifest.provenance.sourceRepo, QwenImage21Configuration.repo)
     }
 
+    /// Turbo: three repos — the Turbo mirror (DiT + pipeline config), the base mirror (VAE) and
+    /// the stock conditioner. A local Turbo download carries only the first.
+    func testTurboMATGate() {
+        let localTurbo = "/Volumes/Satechi/Development/mlxengine-image/weights/Qwen-Image-2.1-Turbo"
+        let fresh = QwenImage21TurboConfiguration()
+        let haveLocal = FileManager.default.fileExists(atPath: localTurbo + "/transformer")
+            && FileManager.default.fileExists(atPath: Self.localSnapshot + "/vae")
+            && FileManager.default.fileExists(atPath: Self.localTextEncoder + "/config.json")
+        let satisfied = QwenImage21TurboConfiguration(
+            snapshotPath: localTurbo, vaeSnapshotPath: Self.localSnapshot, textEncoderPath: Self.localTextEncoder)
+        let report = MaterializationConformance.check(
+            freshConfiguration: fresh, satisfiedConfiguration: haveLocal ? satisfied : nil)
+        XCTAssertTrue(report.passed, report.summary)
+    }
+
     func testExplicitPathsSatisfyTheirOwnRepoOnly() {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("qi21-mat-probe")
         try? FileManager.default.createDirectory(at: tmp.appendingPathComponent("transformer"), withIntermediateDirectories: true)

@@ -29,4 +29,27 @@ final class QwenImage21CancellationTests: XCTestCase {
             posture: .cadence([.init(phase: .denoise, unit: .step)]))
         XCTAssertTrue(report.passed, report.summary)
     }
+
+    // The Turbo package shares the serving path, so the same gates hold.
+
+    func testTurboCANGatePreCancelledTextToImage() async {
+        let package = QwenImage21TurboPackage(configuration: QwenImage21TurboConfiguration())
+        let report = await CancellationConformance.checkRun(package: package, request: T2IRequest(prompt: "probe"))
+        XCTAssertTrue(report.passed, report.summary)
+    }
+
+    func testTurboCANGatePreCancelledImageEdit() async {
+        let package = QwenImage21TurboPackage(configuration: QwenImage21TurboConfiguration())
+        let report = await CancellationConformance.checkRun(
+            package: package, request: IEditRequest(images: [], prompt: "probe"))
+        XCTAssertTrue(report.passed, report.summary)
+    }
+
+    func testTurboCANCadenceDeclaration() {
+        XCTAssertTrue(CancellationConformance.longRunImplied(by: QwenImage21TurboPackage.manifest))
+        let report = CancellationConformance.checkCadence(
+            manifest: QwenImage21TurboPackage.manifest,
+            posture: .cadence([.init(phase: .denoise, unit: .step)]))
+        XCTAssertTrue(report.passed, report.summary)
+    }
 }

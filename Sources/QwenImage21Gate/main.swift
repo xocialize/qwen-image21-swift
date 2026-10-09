@@ -6,9 +6,12 @@
 //   QwenImage21Gate --encoder <qwenDir> <goldensDir> [--tokenizer <dir>]
 //   QwenImage21Gate --dit <weightsRoot> <goldensDir> [--case name]
 //   QwenImage21Gate --generate <weightsRoot> <qwenDir> --prompt "..." [--image p.png]... [--size N]
-//                   [--out-res N] [--steps N] [--seed N] [--cfg S] [--neg "..."] [--out out.png]
-//                   [--no-cache] [--fp32-vae] [--keep-encoder]
+//                   [--out-res N] [--steps N | --sigmas a,b,c | --turbo] [--seed N] [--cfg S] [--neg "..."]
+//                   [--out out.png] [--no-cache] [--fp32-vae] [--keep-encoder] [--vae-root <root>]
 // Parity gates run fp32 on the CPU stream (the fleet's regime); generate runs bf16 on the GPU.
+// `--turbo` samples on the snapshot's own `sample_sigmas` (Qwen-Image-2.1-Turbo, 8 fixed steps);
+// `--vae-root` loads the VAE from another snapshot (the Turbo download carries DiT + configs only —
+// its VAE is the base one cast to bf16, so the fp32 base VAE is the one to use).
 
 import Foundation
 import MLX
@@ -57,6 +60,27 @@ func args(_ flag: String) -> [String] {
 }
 func has(_ flag: String) -> Bool { CommandLine.arguments.contains(flag) }
 
+/// `--sigmas a,b,c` (a fixed grid, terminal 0 excluded) or `--turbo` (the snapshot's own
+/// `sample_sigmas`, as Qwen-Image-2.1-Turbo ships them); nil = the shifted linspace schedule.
+func samplingGrid(root: URL) throws -> [Float]? {
+    if let s = arg("--sigmas") {
+        return s.split(separator: ",").map { Float($0.trimmingCharacters(in: .whitespaces))! }
+    }
+    if has("--turbo") {
+        guard let g = try QwenImage21Scheduler.loadSampleSigmas(snapshot: root) else {
+            throw QwenImage21Error.loading("--turbo: no sample_sigmas in \(root.path)/model_index.json")
+        }
+        print("fixed sampling grid (\(g.count) steps): \(g)")
+        return g
+    }
+    return nil
+}
+
+/// `--vae-root <snapshot>` overrides where `vae/` is loaded from (defaults to the weights root).
+func vaeRoot(default root: URL) -> URL {
+    arg("--vae-root").map { URL(fileURLWithPath: $0) } ?? root
+}
+
 func bools(_ x: MLXArray) -> [Bool] { x.asType(.bool).asArray(Bool.self) }
 func shapes(_ any: Any?) -> [(Int, Int, Int)] {
     (any as? [[Int]] ?? []).map { ($0[0], $0[1], $0[2]) }
@@ -69,8 +93,16 @@ func gateSched(_ dir: URL) throws {
     for s in j["schedules"] as! [[String: Any]] {
         let steps = s["steps"] as! Int, tokens = s["tokens"] as! Int
         let ref = (s["sigmas"] as! [Double]).map { Float($0) }
-        let mu = QwenImage21Scheduler.calculateShift(imageSeqLen: tokens)
-        let ours = QwenImage21Scheduler.sigmas(steps: steps, mu: mu)
+        let mu: Float
+        let ours: [Float]
+        if let fixed = s["fixed"] as? [Double] {
+            // a checkpoint grid (Turbo `sample_sigmas`): verbatim + trailing 0, whatever mu says
+            mu = Float(s["mu"] as! Double)
+            ours = try QwenImage21Scheduler.fixedGrid(fixed.map { Float($0) })
+        } else {
+            mu = QwenImage21Scheduler.calculateShift(imageSeqLen: tokens)
+            ours = QwenImage21Scheduler.sigmas(steps: steps, mu: mu)
+        }
         let maxAbs = zip(ours, ref).map { abs($0 - $1) }.max() ?? 0
         let ok = ours.count == ref.count && maxAbs < 2e-6 && abs(mu - Float(s["mu"] as! Double)) < 1e-6
         if !ok { failures += 1 }
@@ -373,9 +405,10 @@ func vaeDTypeCheck(root: URL, latentsFiles: [String]) throws {
 /// ⚠ These are MLX-pool numbers, not in-app `phys_footprint` (the BiRefNet ~2.7× lesson).
 func memBench(root: URL, qwenDir: URL) async throws {
     let steps = Int(arg("--steps") ?? "2")!
+    let grid = try samplingGrid(root: root)
     let t0 = Date()
     let tr = try QwenImage21Weights.loadTransformer(directory: root.appendingPathComponent("transformer"), dtype: .bfloat16)
-    let vae = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: has("--bf16-vae") ? .bfloat16 : .float32)
+    let vae = try QwenImage21Weights.loadVAE(directory: vaeRoot(default: root).appendingPathComponent("vae"), dtype: has("--bf16-vae") ? .bfloat16 : .float32)
     eval(tr, vae)
     Memory.clearCache()
     let floor = Memory.activeMemory
@@ -411,7 +444,7 @@ func memBench(root: URL, qwenDir: URL) async throws {
         let t = Date()
         _ = try await gen.generate(
             prompt: "a red fox in fresh snow", images: images, width: width, height: height,
-            outputResolution: res, steps: steps, seed: 1)
+            outputResolution: res, steps: steps, sigmas: grid, seed: 1)
         let peak = Memory.peakMemory
         let act = max(peak - floor, 0)
         print(pad(name, 22) + String(format: " %10.2f %10.2f %10.2f %12.2f   [%.0fs]",
@@ -441,10 +474,11 @@ func generate(root: URL, qwenDir: URL) async throws {
         injected = l
         print("injected noise \(l.shape)")
     }
+    let grid = try samplingGrid(root: root)
     let t0 = Date()
     let ditDType: DType = has("--fp32-dit") ? .float32 : .bfloat16
     let tr = try QwenImage21Weights.loadTransformer(directory: root.appendingPathComponent("transformer"), dtype: ditDType)
-    let vae = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: has("--fp32-vae") || has("--fp32-dit") ? .float32 : .bfloat16)
+    let vae = try QwenImage21Weights.loadVAE(directory: vaeRoot(default: root).appendingPathComponent("vae"), dtype: has("--fp32-vae") || has("--fp32-dit") ? .float32 : .bfloat16)
     print(String(format: "loaded DiT %@ + VAE in %.1fs", "\(ditDType)", Date().timeIntervalSince(t0)))
     let gen = QwenImage21Generator(
         encoderProvider: { try await QwenImage21PromptEncoder.load(qwenDir: qwenDir, dtype: .bfloat16) },
@@ -453,15 +487,15 @@ func generate(root: URL, qwenDir: URL) async throws {
     var last = Date()
     let r = try await gen.generate(
         prompt: prompt, images: images, negativePrompt: arg("--neg"), trueCFGScale: cfg,
-        width: size, height: size, outputResolution: outRes, steps: steps, seed: seed, useKVCache: !has("--no-cache"),
-        latents: injected,
+        width: size, height: size, outputResolution: outRes, steps: steps, sigmas: grid, seed: seed,
+        useKVCache: !has("--no-cache"), latents: injected,
         progress: { i, n in
             let now = Date()
             print(String(format: "  step %d/%d  %.2fs  peak %.1f GB", i, n, now.timeIntervalSince(last), Double(Memory.peakMemory) / 1e9))
             last = now
         })
     print(String(format: "generated %dx%d in %.1fs (steps %d, cache %@); peak %.1f GB", r.image.width, r.image.height,
-                 Date().timeIntervalSince(t1), steps, has("--no-cache") ? "off" : "on", Double(Memory.peakMemory) / 1e9))
+                 Date().timeIntervalSince(t1), r.sigmas.count - 1, has("--no-cache") ? "off" : "on", Double(Memory.peakMemory) / 1e9))
     try QwenImage21PNG.write(r.image, to: URL(fileURLWithPath: outPath))
     print("wrote \(outPath)")
     if let sl = arg("--save-latents") {

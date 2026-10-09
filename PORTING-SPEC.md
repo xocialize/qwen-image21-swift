@@ -204,9 +204,27 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   addressed image tokens at `text-positions + i`; the encoder tensor still holds the VL pad rows,
   so images live at `T + i` (reference: cat → repeat_interleave → overwrite). Fixed; all three
   layouts green on target rows (AB-R receipts). Per-block goldens made it a one-run diagnosis.
+- 2026-10-09 Qwen-Image-2.1-Turbo (8-step distill, same research licence) is a SIBLING PACKAGE on
+  this core (`QwenImage21TurboPackage`, same module), not a mode: the DiT weights differ (14.2 GB),
+  a mode would swap them per request — the `MLXQwenImageFlash` precedent. Its VAE is the base VAE
+  cast to bf16 and its text encoder is byte-identical to Qwen3-VL-8B-Instruct (AB-R-0437), so the
+  package has three roots (Turbo DiT + pipeline config, base `vae/`, Instruct) and the mirror
+  `xocialize/Qwen-Image-2.1-Turbo` carries only what Turbo changed. The schedule is the
+  checkpoint's `sample_sigmas` (diffusers PR #14950) used verbatim — `generate(sigmas:)` is the
+  generic seam (a LoRA-form distill such as Viggle's could be a mode through it); a request's
+  `steps` is ignored, as in the reference. Memo: `TURBO-EVAL.md`; task AB-T-0212.
 
 ## 9. Gate results (running log)
 
+- 2026-10-09 TURBO (weights `Qwen/Qwen-Image-2.1-Turbo` @ d65dbc9, shards sha256-verified; goldens
+  `goldens/turbo/` from the Turbo DiT on diffusers main 1d5d056, fp32 CPU): `--sched` exact on the
+  fixed grid at 4,096 and 16,384 tokens (maxAbs 0; base entries unchanged at ≤1.2e-7); `--dit` on
+  Turbo weights green on all three layouts — step-0 target rows cos 1.0000000 (relMax ≤ 1.8e-5),
+  cached step cos 1.0000000, KV cache L0/L31 within 8e-4 relMax, blocks 0/1/7/15/31 cos ≥
+  0.9999998. bf16 GPU e2e at the 8 fixed steps: fox 1024² seed 42 coherent beside the oracle's
+  MPS render (`e2e_turbo_fox_1024.png`; different RNG, so an eyeball gate), 1.34 s/step, 13.2 s
+  for 8 steps, peak 31.2 GB (Release, lightly contended). Offline wrapper gates green: manifest,
+  MAT (three repos), CAN-1..3 on both surfaces.
 - 2026-09-20 sched/attn-probe/resize/vae/encoder: green (AB-R-0253). DiT GPU fp32: green on
   target rows, prefill, KV cache, cached + uncached steps for all layouts; 2-image prefix rows
   relMax 3.9e-2 at cos 0.99999 (GPU noise, CPU run pending).

@@ -13,8 +13,10 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [
         .library(name: "QwenImage21", targets: ["QwenImage21"]),
-        // MLXEngine wrapper: textToImage + imageEdit on one core (PackageID qwen-image-2.1).
-        // C7 = LicenseRef-Qwen-Research (package-local, never allowlisted) — research tier.
+        // MLXEngine wrappers: textToImage + imageEdit on one core — QwenImage21Package (PackageID
+        // qwen-image-2.1, 40 shifted steps) and QwenImage21TurboPackage (qwen-image-2.1-turbo, the
+        // Turbo DiT on its 8 fixed sample_sigmas). C7 = LicenseRef-Qwen-Research for both
+        // (package-local, never allowlisted) — research tier.
         .library(name: "MLXQwenImage21", targets: ["MLXQwenImage21"]),
         .executable(name: "QwenImage21Gate", targets: ["QwenImage21Gate"]),
     ],

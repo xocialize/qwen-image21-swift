@@ -10,11 +10,12 @@ cache, 64-ch 16× **RGBA** VAE (native transparency), Qwen3-VL-8B conditioner.
 > weights' terms, and anything you generate with them is bound by the research licence. "Built with
 > Qwen".
 >
-> **Status: research / evaluation tier — not a product asset.** The `MLXQwenImage21` package declares
-> `weightLicense = LicenseRef-Qwen-Research` package-locally, and that id is never added to any
-> permissive allowlist. A `.permissiveOnly` + `.blocking` engine refuses it; an `.advisory` engine
-> registers it with a licence advisory. Consumers must not route to it by default. Use it only when
-> it is explicitly named. See `PORTING-SPEC.md` §1 and fleet decision AB-D-0085.
+> **Status: research / evaluation tier — not a product asset.** Both `MLXQwenImage21` packages
+> (base and Turbo) declare `weightLicense = LicenseRef-Qwen-Research` package-locally, and that id
+> is never added to any permissive allowlist. A `.permissiveOnly` + `.blocking` engine refuses
+> them; an `.advisory` engine registers them with a licence advisory. Consumers must not route to
+> them by default. Use them only when explicitly named. See `PORTING-SPEC.md` §1 and fleet
+> decision AB-D-0085.
 
 Reference: diffusers main `QwenImage21Pipeline` (PR #14804). Spec, architecture delta vs the
 2511 port, reuse map and parity plan: `PORTING-SPEC.md`. Goldens + oracle:
@@ -42,6 +43,40 @@ and is loaded from that snapshot. On a fresh machine the engine materialises the
 [`xocialize/Qwen-Image-2.1`](https://huggingface.co/xocialize/Qwen-Image-2.1). That repo is an
 unmodified, hash-verified mirror of `Qwen/Qwen-Image-2.1` at `b3179ad`, shipped with the Qwen
 Research LICENSE and NOTICE and without `text_encoder/`.
+
+## Turbo tier: Qwen-Image-2.1-Turbo (2026-10-09)
+
+[Qwen/Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo) is the same model
+distilled to **8 fixed steps** for text-to-image and editing, under the same research licence.
+What it adds is small (AB-R-0437): the DiT re-weighted (identical config and tensor set, 14.2 GB)
+and the schedule it was distilled on, shipped as `sample_sigmas` in `model_index.json` (diffusers
+PR #14950) with the scheduler's dynamic shift and terminal stretch switched off, so the grid
+`[1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568]` is used verbatim
+plus a trailing 0, whatever the token count. Its `vae/` is the base VAE cast to bf16 and its
+`text_encoder/` is byte-identical to Qwen3-VL-8B-Instruct, so neither is downloaded.
+
+- Core: `QwenImage21Generator.generate(sigmas:)` takes a fixed grid (`steps` is then ignored);
+  `QwenImage21Scheduler.loadSampleSigmas(snapshot:)` reads it from a snapshot and refuses a
+  scheduler config that would still shift it.
+- Package: `QwenImage21TurboPackage` (`MLXQwenImage21`, PackageID `qwen-image-2.1-turbo`,
+  textToImage + imageEdit) — three roots: the Turbo snapshot (`transformer/`, `model_index.json`,
+  `scheduler/`; mirror [`xocialize/Qwen-Image-2.1-Turbo`](https://huggingface.co/xocialize/Qwen-Image-2.1-Turbo)
+  at upstream `d65dbc9`), the base snapshot for the fp32 `vae/`, and Qwen3-VL-8B-Instruct. Same
+  footprint envelope as the base package (same shapes). A request's `steps` is ignored; guidance
+  stays at 1.
+- Gate: `--turbo` samples on the snapshot's grid; `--vae-root` points at the base VAE.
+
+```
+.build/release/QwenImage21Gate --sched ../qwen-image21-oracle/goldens            # incl. the fixed-grid entries
+.build/release/QwenImage21Gate --dit   ../../weights/Qwen-Image-2.1-Turbo ../qwen-image21-oracle/goldens/turbo
+.build/release/QwenImage21Gate --generate ../../weights/Qwen-Image-2.1-Turbo ../../weights/Qwen3-VL-8B-Instruct \
+    --vae-root ../../weights/Qwen-Image-2.1 --turbo --prompt "a red fox in fresh snow" --size 1024 --out fox8.png
+```
+
+Parity on the Turbo weights (fp32 CPU, 2026-10-09): all three DiT layouts green, block/step
+cos ≥ 0.9999998, schedule exact. Evaluation memo and the plan: `TURBO-EVAL.md`; task AB-T-0212.
+Oracle goldens: `../qwen-image21-oracle/goldens/turbo/` (`make_goldens.py dit --turbo`,
+`e2e --turbo`, on the `.venv314` env).
 
 ## GPU numerics: the VAE's 3×3 convs (2026-09-24)
 
